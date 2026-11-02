@@ -21,6 +21,10 @@ time, so keep the tab visible until the song ends.
 
 No build step and no dependencies. It's plain ES modules.
 
+**Single file you can double-click:** `node tools/bundle.mjs` writes
+`fruit-party.html`, a self-contained copy that runs straight from your
+computer without a server. You can also send it to friends.
+
 ## How the sync works (no grid, no BPM)
 
 | Step | File | What it does |
