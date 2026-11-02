@@ -1,28 +1,40 @@
 import { analyzeBuffer } from './analysis.js';
 import { buildChoreography } from './choreography.js';
 import { renderFrame } from './scene.js';
-import { synthDemo, encodeWav } from './demo.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('video'), ctx = canvas.getContext('2d');
-const tl = $('timeline'), tctx = tl.getContext('2d');
 const W = canvas.width, H = canvas.height;
-let buffer = null, analysis = null, chor = null, title = '';
-let timelineImg = null;
+
+let file = null, buffer = null, analysis = null, chor = null, title = '';
 let recorder = null;
 
-const status = (s) => { $('status').textContent = s; };
+function status(msg, isError = false) {
+  $('status').textContent = msg;
+  $('status').classList.toggle('error', isError);
+}
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
-for (const [id, out, f] of [['cast', 'castOut', (v) => v], ['sens', 'sensOut', (v) => Number(v).toFixed(1)], ['offset', 'offsetOut', (v) => v]]) {
-  $(id).addEventListener('input', () => { $(out).textContent = f($(id).value); });
+// Show any unexpected failure on the page instead of failing silently.
+window.addEventListener('error', (e) => status(`Something went wrong: ${e.message}`, true));
+window.addEventListener('unhandledrejection', (e) => status(`Something went wrong: ${e.reason && e.reason.message ? e.reason.message : e.reason}`, true));
+
+// Older Safari/Firefox lack roundRect, which the speech bubbles use.
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y, x + w, y + h, r);
+    this.arcTo(x + w, y + h, x, y + h, r);
+    this.arcTo(x, y + h, x, y, r);
+    this.arcTo(x, y, x + w, y, r);
+    this.closePath();
+  };
 }
 
 // ---------- playback ----------
-// The song plays from the decoded buffer through Web Audio, not an <audio>
-// element. Hosted/sandboxed pages often forbid <audio> from loading blob:
-// URLs of uploaded files, which silently broke playback there. The clock is
-// also more precise: we know exactly when the buffer started.
+// The song plays from the decoded buffer through Web Audio rather than an
+// <audio> element: hosted pages often block <audio> from loading uploads.
 const Ctx = window.AudioContext || window.webkitAudioContext;
 const player = {
   actx: null, master: null, src: null,
@@ -33,25 +45,25 @@ const player = {
       this.master = this.actx.createGain();
       this.master.connect(this.actx.destination);
     }
+    // must happen inside a tap/click on phones
+    if (this.actx.state === 'suspended') this.actx.resume();
     return this.actx;
   },
-  // what the listener is hearing right now (minus output latency)
   time() {
     if (!this.playing) return this.offset;
     const lat = this.actx.outputLatency || this.actx.baseLatency || 0;
     return Math.max(0, this.actx.currentTime - this.startedAt + this.offset - lat);
   },
-  async play(from = this.offset) {
+  play(from = this.offset) {
     if (!buffer) return;
     this.ensure();
-    if (this.actx.state === 'suspended') await this.actx.resume();
     this.stopSource();
     if (from >= buffer.duration - 0.05) from = 0;
     const src = this.actx.createBufferSource();
     src.buffer = buffer;
     src.connect(this.master);
     src.onended = () => {
-      if (this.src !== src) return; // stopped on purpose (pause/seek)
+      if (this.src !== src) return; // stopped on purpose
       this.playing = false;
       this.offset = buffer.duration;
       this.src = null;
@@ -72,9 +84,6 @@ const player = {
     this.playing = false;
     setPlayLabel();
   },
-  seek(t) {
-    if (this.playing) this.play(t); else this.offset = t;
-  },
   stopSource() {
     const s = this.src;
     this.src = null;
@@ -83,179 +92,98 @@ const player = {
 };
 function setPlayLabel() { $('play').textContent = player.playing ? '❚❚ Pause' : '▶ Play'; }
 
-function decode(ab) {
-  // promise + callback form, for older Safari
-  const dctx = new Ctx();
+function readFile(f) {
+  if (f.arrayBuffer) return f.arrayBuffer();
   return new Promise((resolve, reject) => {
-    const p = dctx.decodeAudioData(ab, resolve, reject);
-    if (p && p.then) p.then(resolve, reject);
-  }).finally(() => dctx.close && dctx.close());
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error('could not read the file'));
+    r.readAsArrayBuffer(f);
+  });
 }
 
-async function loadArrayBuffer(ab, name) {
-  status(`Decoding “${name}”…`);
+function decode(actx, ab) {
+  // callback + promise form so older Safari works too
+  return new Promise((resolve, reject) => {
+    const p = actx.decodeAudioData(ab, resolve, reject);
+    if (p && p.then) p.then(resolve, reject);
+  });
+}
+
+// ---------- the two steps ----------
+$('file').addEventListener('change', () => {
+  file = $('file').files && $('file').files[0];
+  $('generate').disabled = !file;
+  if (file) status(`Ready: ${file.name}. Press Generate.`);
+});
+
+$('generate').addEventListener('click', async () => {
+  if (!file) return;
+  const actx = player.ensure(); // unlock sound while we still have the tap
   player.pause();
   player.offset = 0;
+  $('generate').disabled = true;
+  status(`Reading ${file.name}…`);
   try {
-    buffer = await decode(ab);
-  } catch (err) {
-    status(`Couldn't read “${name}” as audio. Try an mp3 or wav file. (${err && err.message ? err.message : err})`);
-    return;
-  }
-  title = name.replace(/\.[^.]+$/, '');
-  analyse();
-}
-
-async function loadFile(f) {
-  if (!f) return;
-  try {
-    const ab = f.arrayBuffer ? await f.arrayBuffer() : await new Response(f).arrayBuffer();
-    await loadArrayBuffer(ab, f.name || 'song');
-  } catch (err) {
-    status(`Couldn't open that file: ${err.message || err}`);
-  }
-}
-
-function analyse() {
-  status('Listening for hits…');
-  // let the status paint before the (short) blocking analysis
-  setTimeout(() => {
-    const t0 = performance.now();
-    analysis = analyzeBuffer(buffer, { sensitivity: Number($('sens').value) });
-    rebuild();
+    const ab = await readFile(file);
+    status('Decoding the audio…');
+    try {
+      buffer = await decode(actx, ab);
+    } catch (err) {
+      throw new Error(`couldn't read "${file.name}" as audio. Try an mp3 or wav file.`);
+    }
+    status('Listening for the beats…');
+    await new Promise((r) => setTimeout(r, 30)); // let the message paint
+    analysis = analyzeBuffer(buffer);
+    chor = buildChoreography(analysis, { seed: Math.floor(Math.random() * 1e6) + 1 });
+    title = file.name.replace(/\.[^.]+$/, '');
+    $('stage').hidden = false;
+    $('download').hidden = true;
     const calm = chor.scenes.filter((s) => s.type === 'sincere').length;
-    status(`${analysis.onsets.length} onsets, ${analysis.pulses.length} pulses, ${chor.scenes.length} scenes (${calm} sincere), analysed in ${Math.round(performance.now() - t0)} ms.`);
-    for (const b of ['play', 'record', 'rebuild']) $(b).disabled = false;
-  }, 30);
-}
-
-function rebuild() {
-  chor = buildChoreography(analysis, {
-    seed: Number($('seed').value) || 1,
-    castSize: Number($('cast').value),
-    customLines: $('lines').value.split('\n'),
-  });
-  drawTimelineBase();
-}
-
-function drawTimelineBase() {
-  const w = tl.width, h = tl.height, d = analysis.duration;
-  const off = document.createElement('canvas');
-  off.width = w; off.height = h;
-  const c = off.getContext('2d');
-  c.fillStyle = '#22223b'; c.fillRect(0, 0, w, h);
-  for (const s of chor.scenes) {
-    c.fillStyle = s.type === 'sincere' ? '#c5618355' : '#5a189a55';
-    c.fillRect((s.start / d) * w, 0, ((s.end - s.start) / d) * w, h);
-    c.fillStyle = '#ffffff99';
-    c.font = '11px sans-serif';
-    c.fillText(s.type === 'sincere' ? '♡ sincere' : s.formation, (s.start / d) * w + 4, 12);
+    status(`Generated: ${chor.scenes.length} scenes, ${calm} sincere moment${calm === 1 ? '' : 's'}. Press Generate again for a different version.`);
+    player.play(0);
+    $('stage').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    status(`Sorry, ${err.message || err}`, true);
+  } finally {
+    $('generate').disabled = !file;
   }
-  // loudness
-  c.strokeStyle = '#9a8c98'; c.beginPath();
-  const env = analysis.env.rms;
-  for (let x = 0; x < w; x++) {
-    const v = env[Math.floor((x / w) * env.length)] || 0;
-    c.lineTo(x, h - 4 - v * (h * 0.45));
-  }
-  c.stroke();
-  const bandCol = ['#ff006e', '#ffbe0b', '#3a86ff'];
-  for (const o of analysis.onsets) {
-    c.fillStyle = bandCol[o.band] + 'aa';
-    const x = (o.time / d) * w;
-    c.fillRect(x, h - 4 - o.strength * 30, 1, o.strength * 30);
-  }
-  c.fillStyle = '#fff';
-  for (const p of analysis.pulses) c.fillRect((p.time / d) * w - 1, h - 3, 2, 3);
-  for (const s of chor.scenes) for (const b of s.bubbles) {
-    c.fillStyle = b.shout ? '#ffd60a' : '#ffffff';
-    c.fillRect((b.start / d) * w, 18, Math.max(2, ((b.end - b.start) / d) * w), 4);
-  }
-  timelineImg = off;
-}
+});
 
-function drawTimeline(t) {
-  if (!timelineImg) return;
-  tctx.drawImage(timelineImg, 0, 0);
-  const x = (t / analysis.duration) * tl.width;
-  tctx.fillStyle = '#fff';
-  tctx.fillRect(x - 1, 0, 2, tl.height);
-}
+$('play').addEventListener('click', () => {
+  if (player.playing) player.pause(); else player.play();
+});
 
+// ---------- drawing loop ----------
 let frozen = false;
 function frame() {
-  if (frozen) { requestAnimationFrame(frame); return; }
-  if (analysis && chor) {
-    const now = player.time();
-    const t = Math.max(0, Math.min(analysis.duration, now + Number($('offset').value) / 1000));
-    renderFrame(ctx, W, H, t, analysis, chor, { title });
-    drawTimeline(t);
-    $('time').textContent = `${fmt(now)} / ${fmt(analysis.duration)}`;
-  } else {
-    ctx.fillStyle = '#1b1b2f'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#fff'; ctx.font = '32px "Trebuchet MS", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('🍎 🍌 🍓  load a song to start the party  🍐 🍋 🍊', W / 2, H / 2);
-    ctx.textAlign = 'start';
+  try {
+    if (!frozen && analysis && chor && !$('stage').hidden) {
+      const t = Math.min(analysis.duration, player.time());
+      renderFrame(ctx, W, H, t, analysis, chor, { title });
+      $('time').textContent = `${fmt(t)} / ${fmt(analysis.duration)}`;
+    }
+  } catch (err) {
+    status(`Drawing failed: ${err.message}`, true);
   }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
-// ---------- controls ----------
-$('file').addEventListener('change', async (e) => {
-  const f = e.target.files && e.target.files[0];
-  e.target.value = ''; // so picking the same file again still triggers
-  await loadFile(f);
-});
-
-// drag a song anywhere onto the page
-document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
-document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
-document.addEventListener('drop', async (e) => {
-  e.preventDefault();
-  document.body.classList.remove('dragging');
-  await loadFile(e.dataTransfer.files && e.dataTransfer.files[0]);
-});
-
-$('demo').addEventListener('click', async () => {
-  player.ensure(); // unlock audio on this click
-  const d = synthDemo();
-  await loadArrayBuffer(encodeWav(d.data, d.sampleRate), 'Demo — Rubato Orchard');
-});
-
-$('play').addEventListener('click', async () => {
-  if (player.playing) player.pause(); else await player.play();
-});
-
-tl.addEventListener('click', (e) => {
-  if (!analysis) return;
-  const r = tl.getBoundingClientRect();
-  player.seek(((e.clientX - r.left) / r.width) * analysis.duration);
-});
-
-$('rebuild').addEventListener('click', () => {
-  if (!buffer) return;
-  analyse();
-});
-$('seed').addEventListener('change', () => analysis && rebuild());
-$('cast').addEventListener('change', () => analysis && rebuild());
-$('lines').addEventListener('change', () => analysis && rebuild());
-$('sens').addEventListener('change', () => buffer && analyse());
-
-$('record').addEventListener('click', async () => {
+// ---------- save as a video file ----------
+$('save').addEventListener('click', () => {
   if (recorder) { recorder.stop(); player.pause(); return; }
+  if (!buffer) return;
   const actx = player.ensure();
-  if (actx.state === 'suspended') await actx.resume();
+  const types = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
+  const mimeType = window.MediaRecorder && canvas.captureStream && types.find((m) => MediaRecorder.isTypeSupported(m));
+  if (!mimeType) { status('This browser can\'t save video. Try Chrome or Firefox on a computer.', true); return; }
   const dest = actx.createMediaStreamDestination();
   player.master.connect(dest);
   const stream = canvas.captureStream(30);
   stream.addTrack(dest.stream.getAudioTracks()[0]);
-  const types = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
-  const mimeType = types.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
-  if (!mimeType) { status('This browser cannot record video (MediaRecorder unsupported).'); return; }
   const chunks = [];
-  recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
+  recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6000000 });
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   recorder.onstop = () => {
     player.master.disconnect(dest);
@@ -264,21 +192,20 @@ $('record').addEventListener('click', async () => {
     a.href = URL.createObjectURL(blob);
     a.download = `${title || 'fruit-party'}.${mimeType.includes('mp4') ? 'mp4' : 'webm'}`;
     a.hidden = false;
-    $('record').classList.remove('on');
-    $('record').textContent = '● Record .webm';
-    setPlayLabel();
+    $('save').classList.remove('on');
+    $('save').textContent = 'Save video';
     recorder = null;
-    status('Video ready, use the download button.');
+    status('Your video is ready. Press Download video.');
   };
   recorder.start(1000);
-  await player.play(0);
+  player.play(0);
   player.onEnd = () => recorder && recorder.stop();
-  $('record').classList.add('on');
-  $('record').textContent = '■ Stop recording';
-  status('Recording in real time. Keep this tab visible until the song ends.');
+  $('save').classList.add('on');
+  $('save').textContent = '■ Stop';
+  status('Recording the whole song in real time. Keep this page open and on screen until it ends.');
 });
 
-// handy for debugging / scripted frame export: window.fruitParty.renderAt(12.3)
+// for debugging: window.fruitParty.renderAt(12.3)
 window.fruitParty = {
   get analysis() { return analysis; },
   get choreography() { return chor; },

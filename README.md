@@ -15,9 +15,12 @@ npm start          # or: python3 -m http.server 8000
 # open http://localhost:8000
 ```
 
-Choose a song, or click **Use demo track**. Press **Play** to watch, or
-**Record .webm** to capture the full video with audio. Recording runs in real
-time, so keep the tab visible until the song ends.
+1. **Upload audio:** pick a song (mp3, wav, m4a and so on).
+2. **Generate:** the video starts playing. Press Generate again for a
+   different cast, different moves and different lines.
+
+**Save video** records the whole song with sound as a `.webm` file. Recording
+runs in real time, so keep the page on screen until the song ends.
 
 No build step and no dependencies. It's plain ES modules.
 
