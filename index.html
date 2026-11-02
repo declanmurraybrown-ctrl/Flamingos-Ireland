@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fruit Party Video Maker</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header>
+    <h1>🍓 Fruit Party <span>music video maker</span></h1>
+    <p class="sub">Drop in a song. Fruit people dance to the hits the song actually has (no fixed grid), then stop for a few sincere words in the quiet parts.</p>
+  </header>
+
+  <main>
+    <section class="stage">
+      <canvas id="video" width="1280" height="720"></canvas>
+      <canvas id="timeline" width="1280" height="96" title="Click to seek"></canvas>
+      <div class="transport">
+        <button id="play" disabled>▶ Play</button>
+        <button id="record" disabled>● Record .webm</button>
+        <span id="time">0:00 / 0:00</span>
+        <a id="download" hidden>⬇ Download video</a>
+      </div>
+      <p id="status">Load a song or try the demo track.</p>
+    </section>
+
+    <aside class="controls">
+      <label class="file">
+        <input type="file" id="file" accept="audio/*">
+        <span>🎵 Choose a song…</span>
+      </label>
+      <button id="demo">Use demo track (tempo drifts, 7/8 and 5/4)</button>
+
+      <fieldset>
+        <legend>Video</legend>
+        <label>Seed <input type="number" id="seed" value="1" min="1"></label>
+        <label>Fruit people <input type="range" id="cast" min="2" max="9" value="6"><output id="castOut">6</output></label>
+        <label>Hit sensitivity <input type="range" id="sens" min="0.5" max="2" step="0.1" value="1"><output id="sensOut">1.0</output></label>
+        <label>A/V offset (ms) <input type="range" id="offset" min="-200" max="200" step="10" value="0"><output id="offsetOut">0</output></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Your own lines (optional)</legend>
+        <textarea id="lines" rows="6" placeholder="One per line. Paired as call &amp; response in the sincere scenes.&#10;e.g.&#10;Do you hear it too?&#10;Only when I stop being afraid."></textarea>
+      </fieldset>
+      <button id="rebuild" disabled>↻ Re-generate</button>
+
+      <details>
+        <summary>How the sync works</summary>
+        <ul>
+          <li><b>Onsets</b> come from spectral flux in three bands (bass, mid, high) with an adaptive threshold. There is no BPM and no grid.</li>
+          <li><b>Pulse:</b> the stronger onsets are picked by local context, so tempo drift, rubato and odd meters are kept as they are. Every move eases from one real hit to the next.</li>
+          <li><b>Sections:</b> changes in energy and onset density split the song. Calm stretches become the sincere scenes, and cuts are snapped onto strong hits.</li>
+          <li><b>Words</b> in the speech bubbles appear on onsets inside the phrase, so the lines feel sung.</li>
+        </ul>
+      </details>
+    </aside>
+  </main>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
